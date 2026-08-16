@@ -225,10 +225,12 @@ extension LinxScanner: CBCentralManagerDelegate {
         guard mfgID == expectedManufacturerID, bytes.count == 27 else { return }
         lastAdvertisementAt = Date()
 
-        // Picker list: report to the UI ONLY devices whose name contains "Linx"
-        // (never other BT devices). This runs BEFORE serial filtering so every
-        // in-range Linx appears.
-        if advName.lowercased().contains("linx") {
+        // The radio signature above identifies compatible Linx hardware more
+        // reliably than the advertised name. Rebranded sensors (for example
+        // DiaExpert Sensor 2) use a different Bluetooth name even though they
+        // broadcast the same packet format. This runs BEFORE serial filtering
+        // so every compatible in-range sensor appears in the picker.
+        if !advName.isEmpty {
             delegate?.linxScanner(self, didDiscoverDeviceNamed: advName, rssi: RSSI.intValue)
         }
 
@@ -236,8 +238,11 @@ extension LinxScanner: CBCentralManagerDelegate {
         if let wanted = delegate?.sensorSerialForLinxScanner(self),
            !wanted.isEmpty
         {
-            // Partial match is enough (advertised name is "LinX-2222296PN2" format).
-            if !advName.isEmpty, !advName.contains(wanted) {
+            // Partial, case-insensitive matching supports both LinX and
+            // rebranded device-name prefixes while keeping serial selection.
+            if !advName.isEmpty,
+               advName.range(of: wanted, options: [.caseInsensitive, .diacriticInsensitive]) == nil
+            {
                 return
             }
         }
