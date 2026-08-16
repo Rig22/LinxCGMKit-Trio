@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import HealthKit
 import LinxCGMKit
 import LoopKit
 import LoopKitUI
@@ -27,7 +28,10 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
         calB = st.calibration.calB
         calPoints = st.calibration.points
         statusText = cgmManager.currentStatusText
-        latestGlucoseText = Self.glucoseText(cgmManager.latestReading)
+        latestGlucoseText = Self.glucoseText(
+            cgmManager.latestReading,
+            displayGlucosePreference: displayGlucosePreference
+        )
         nearbyDevices = cgmManager.nearbyDevices
 
         cgmManager.addStateObserver(self)
@@ -37,9 +41,38 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
         cgmManager.removeStateObserver(self)
     }
 
-    static func glucoseText(_ r: LinxGlucoseReading?) -> String {
+    private static func glucoseText(
+        _ r: LinxGlucoseReading?,
+        displayGlucosePreference: DisplayGlucosePreference
+    ) -> String {
         guard let r = r else { return "—" }
-        return String(format: "%.1f mmol/L (%d mg/dL)", r.glucoseMmol, r.glucoseMgdl)
+        let quantity = HKQuantity(
+            unit: HKUnit(from: "mg/dL"),
+            doubleValue: Double(r.glucoseMgdl)
+        )
+        return displayGlucosePreference.format(quantity)
+    }
+
+    private var displaysMgdl: Bool {
+        displayGlucosePreference.unit == HKUnit(from: "mg/dL")
+    }
+
+    var calibrationInputPlaceholder: String {
+        displaysMgdl ? "Ref mg/dL" : "Ref mmol/L"
+    }
+
+    var activeCurveText: String {
+        if displaysMgdl {
+            return String(format: "mg/dL = %.5f·raw + %.3f", calA * 18, calB * 18)
+        }
+        return String(format: "mmol/L = %.5f·raw + %.3f", calA, calB)
+    }
+
+    func calibrationPointText(_ point: LinxCalPoint) -> String {
+        if displaysMgdl {
+            return "\(LinxDecoder.mmolToMgdl(point.mmol)) mg/dL"
+        }
+        return String(format: "%.1f mmol/L", point.mmol)
     }
 
     /// Raw glu10 value from the latest reading (for calibration).
@@ -66,10 +99,11 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
         nearbyDevices = cgmManager.nearbyDevices
     }
 
-    /// Record a new calibration point with the given reference mmol/L against
+    /// Record a new calibration point in the user's display unit against
     /// the CURRENT raw glu10 value.
-    func addCalibration(refMmol: Double) {
+    func addCalibration(referenceValue: Double) {
         guard let raw10 = currentRaw10 else { return }
+        let refMmol = displaysMgdl ? referenceValue / 18 : referenceValue
         cgmManager.addCalibration(glu10: raw10, mmol: refMmol)
         refresh()
     }
@@ -94,14 +128,20 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
             self.calB = state.calibration.calB
             self.calPoints = state.calibration.points
             if self.sensorSerial.isEmpty, let s = state.sensorSerial { self.sensorSerial = s }
-            self.latestGlucoseText = Self.glucoseText(self.cgmManager.latestReading)
+            self.latestGlucoseText = Self.glucoseText(
+                self.cgmManager.latestReading,
+                displayGlucosePreference: self.displayGlucosePreference
+            )
         }
     }
 
     func linxStatusDidUpdate(_ status: String) {
         DispatchQueue.main.async {
             self.statusText = status
-            self.latestGlucoseText = Self.glucoseText(self.cgmManager.latestReading)
+            self.latestGlucoseText = Self.glucoseText(
+                self.cgmManager.latestReading,
+                displayGlucosePreference: self.displayGlucosePreference
+            )
         }
     }
 

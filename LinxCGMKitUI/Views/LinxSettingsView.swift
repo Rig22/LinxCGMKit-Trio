@@ -133,7 +133,7 @@ struct LinxSettingsView: View {
             HStack {
                 Text("Active curve")
                 Spacer()
-                Text(String(format: "mmol = %.5f·raw + %.3f", viewModel.calA, viewModel.calB))
+                Text(viewModel.activeCurveText)
                     .font(.footnote.monospaced())
                     .foregroundColor(.secondary)
             }
@@ -161,7 +161,7 @@ struct LinxSettingsView: View {
                     HStack {
                         Text("raw \(p.glu10)")
                         Spacer()
-                        Text(String(format: "%.1f mmol/L", p.mmol)).foregroundColor(.secondary)
+                        Text(viewModel.calibrationPointText(p)).foregroundColor(.secondary)
                     }
                     .font(.footnote)
                 }
@@ -169,11 +169,11 @@ struct LinxSettingsView: View {
 
             // Record new point
             HStack {
-                TextField("Ref mmol/L", text: $refInput)
+                TextField(viewModel.calibrationInputPlaceholder, text: $refInput)
                     .keyboardType(.decimalPad)
                 Button("Record") {
                     if let v = Double(refInput.replacingOccurrences(of: ",", with: ".")) {
-                        viewModel.addCalibration(refMmol: v)
+                        viewModel.addCalibration(referenceValue: v)
                         refInput = ""
                     }
                 }
