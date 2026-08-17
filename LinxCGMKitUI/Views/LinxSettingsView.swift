@@ -40,7 +40,7 @@ struct LinxSettingsView: View {
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.trailing)
             }
-            Text("The Loop updates about every 3 minutes with a new Linx reading.")
+            Text("The Loop updates about every 5 minutes with a new Linx reading.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
         }
@@ -60,7 +60,7 @@ struct LinxSettingsView: View {
         }
     }
 
-    // MARK: - Picker: nearby Linx sensors (names containing "Linx" only)
+    // MARK: - Picker: nearby compatible Linx sensors
 
     private var nearbySection: some View {
         Section(
@@ -69,10 +69,15 @@ struct LinxSettingsView: View {
         ) {
             if viewModel.nearbyDevices.isEmpty {
                 HStack {
-                    Text("Searching…")
+                    Text(viewModel.isReceivingViaGATT ? "Connected via GATT" : "Searching…")
                         .foregroundColor(.secondary)
                     Spacer()
-                    ProgressView()
+                    if viewModel.isReceivingViaGATT {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                    } else {
+                        ProgressView()
+                    }
                 }
             } else {
                 ForEach(viewModel.nearbyDevices) { device in
@@ -126,7 +131,7 @@ struct LinxSettingsView: View {
         Section(
             header: Text("Two-point calibration"),
             footer: Text(
-                "Enter the current reference blood glucose (fingerstick or Dexcom). 2 different points set an accurate slope + offset. The raw signal comes from the sensor."
+                "Enter the current reference blood glucose (fingerstick or Dexcom). One point corrects the offset; 2 different points set slope + offset."
             )
         ) {
             // Active curve
@@ -141,7 +146,7 @@ struct LinxSettingsView: View {
             // Current raw value
             if let raw = viewModel.currentRaw10 {
                 HStack {
-                    Text("Current raw (raw10)")
+                    Text(viewModel.currentCalibrationInputLabel)
                     Spacer()
                     Text("\(raw)").foregroundColor(.secondary)
                 }
@@ -159,7 +164,7 @@ struct LinxSettingsView: View {
             } else {
                 ForEach(Array(viewModel.calPoints.enumerated()), id: \.offset) { _, p in
                     HStack {
-                        Text("raw \(p.glu10)")
+                        Text(viewModel.calibrationPointInputText(p))
                         Spacer()
                         Text(viewModel.calibrationPointText(p)).foregroundColor(.secondary)
                     }

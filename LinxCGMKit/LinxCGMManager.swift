@@ -92,13 +92,11 @@ public class LinxCGMManager: CGMManager {
             .sorted { $0.rssi > $1.rssi }
     }
 
-    /// We pass a new sample to Loop at most this often → GOAL: Loop activates ~every 3 minutes
-    /// (3-minute loop). The scanner keeps watching continuously in the background (miss no
-    /// packet), but we drop intermediate (per-minute) packets because Loop works on a 3-minute
-    /// grid. The 10 s tolerance (below) absorbs phase drift, and downstream gates
-    /// (GlucoseStorage filter, APSManager.canStartNewLoop) are also set BELOW 3 minutes so every
-    /// ~3-minute sample reliably triggers a loop.
-    public static let loopCycleInterval: TimeInterval = 3 * 60 // 3 minutes in seconds
+    /// DiaExpert reports every minute, but AID dosing runs on a five-minute cycle.
+    /// Keep all minute values for HUD and smoothing, while passing only one sample
+    /// per five-minute window to Loop. The 10-second tolerance below absorbs BLE
+    /// delivery jitter around the nominal boundary.
+    public static let loopCycleInterval: TimeInterval = 5 * 60
 
     /// Time of the last sample actually passed to Loop.
     private var lastSampleSentAt: Date?
@@ -162,6 +160,8 @@ public class LinxCGMManager: CGMManager {
         sensorSerial: \(String(describing: state.sensorSerial))
         calA: \(state.calibration.calA) calB: \(state.calibration.calB)
         calPoints: \(state.calibration.points.count)
+        gattCalA: \(state.gattCalibration.calA) gattCalB: \(state.gattCalibration.calB)
+        gattCalPoints: \(state.gattCalibration.points.count)
         latestReadingDate: \(String(describing: state.latestReadingDate))
         lastStatus: \(lastStatus)
         """
@@ -185,14 +185,24 @@ public class LinxCGMManager: CGMManager {
 
     public func addCalibration(glu10: Int, mmol: Double) {
         mutateState { state in
-            state.calibration.addPoint(glu10: glu10, mmol: mmol)
+            if self.scanner.isReceivingViaGATT {
+                state.gattCalibration.addPoint(glu10: glu10, mmol: mmol)
+            } else {
+                state.calibration.addPoint(glu10: glu10, mmol: mmol)
+            }
         }
+        resetSmoothingAfterCalibrationChange()
     }
 
     public func resetCalibration() {
         mutateState { state in
-            state.calibration.reset()
+            if self.scanner.isReceivingViaGATT {
+                state.gattCalibration = .gattDefault
+            } else {
+                state.calibration.reset()
+            }
         }
+        resetSmoothingAfterCalibrationChange()
     }
 
     public func setSensorSerial(_ serial: String?) {
@@ -202,19 +212,22 @@ public class LinxCGMManager: CGMManager {
     }
 
     /// Called by the picker UI on open: immediately starts scanning so the in-range
-    /// Linx sensor list fills quickly (Loop would otherwise trigger scanning only ~every 3 minutes).
+    /// Linx sensor list fills quickly (Loop would otherwise trigger scanning only ~every 5 minutes).
     public func startScanningForPicker() {
         scanner.resumeScanning()
     }
 
     public var currentStatusText: String { lastStatus }
+    public var isReceivingViaGATT: Bool { scanner.isReceivingViaGATT }
 
     // MARK: - CGMManager methods
 
     public func fetchNewDataIfNeeded(_ completion: @escaping (CGMReadingResult) -> Void) {
         scanner.restartScanIfStale(lastDataAt: lastSampleSentAt)
-        scanner.resumeScanning()
-        logBackgroundScanDiagnostics(trigger: "heartbeat")
+        if !scanner.isReceivingViaGATT {
+            scanner.resumeScanning()
+            logBackgroundScanDiagnostics(trigger: "heartbeat")
+        }
         completion(.noData)
     }
 
@@ -320,6 +333,15 @@ public class LinxCGMManager: CGMManager {
     /// Last trend rate we computed ourselves (mg/dL/min).
     private var lastComputedTrendRate: HKQuantity?
 
+    /// A changed curve must take effect on the next value without being blended
+    /// with samples produced by the previous curve. Keep the Loop cadence intact.
+    private func resetSmoothingAfterCalibrationChange() {
+        rawBuffer.removeAll()
+        lastSampleValue = nil
+        lastComputedTrend = .flat
+        lastComputedTrendRate = nil
+    }
+
     // MARK: - Smoothing (accuracy while moving)
 
     // Broadcast sends the RAW value, which can jump while moving (the official AiDEX app
@@ -399,20 +421,35 @@ public class LinxCGMManager: CGMManager {
 
 extension LinxCGMManager: LinxScannerDelegate {
     public func linxScanner(_: LinxScanner, didRead reading: LinxGlucoseReading) {
+        let effectiveReading: LinxGlucoseReading
+        if reading.source == .gatt {
+            let calibration = state.gattCalibration
+            let calibratedMgdl = LinxDecoder.mmolToMgdl(calibration.mmol(forRaw10: reading.raw10))
+            effectiveReading = LinxGlucoseReading(
+                receivedAt: reading.receivedAt,
+                glucoseMgdl: calibratedMgdl,
+                trend: reading.trend,
+                raw10: reading.raw10,
+                serial: reading.serial,
+                rawHex: reading.rawHex,
+                source: reading.source
+            )
+        } else {
+            effectiveReading = reading
+        }
+
         // Always keep the latest value for HUD display.
-        latestReading = reading
+        latestReading = effectiveReading
 
         // SMOOTHING: buffer every incoming raw value (even BEFORE the gate) so the
         // smoothing window fills from per-minute packets.
-        let rawClamped = min(max(reading.glucoseMgdl, 40), 400)
-        let smoothed = smoothedValue(rawMgdl: rawClamped, at: reading.receivedAt)
+        let rawClamped = min(max(effectiveReading.glucoseMgdl, 40), 400)
+        let smoothed = smoothedValue(rawMgdl: rawClamped, at: effectiveReading.receivedAt)
 
-        // 3-MINUTE GATE: pass a new sample to Loop only if ~3 minutes have elapsed
-        // since the last pass. That way Loop activates ~every 3 minutes. We allow a
-        // small tolerance (10 s) so a packet arriving around ~3 minutes does not slip
-        // into the next window.
+        // FIVE-MINUTE GATE: buffer every minute value, but only activate Loop
+        // once per standard AID cycle. A small tolerance absorbs BLE phase drift.
         if let sentAt = lastSampleSentAt,
-           reading.receivedAt.timeIntervalSince(sentAt) < (Self.loopCycleInterval - 10)
+           effectiveReading.receivedAt.timeIntervalSince(sentAt) < (Self.loopCycleInterval - 10)
         {
             // Still within loopCycleInterval window → do not activate Loop
             // (but the raw value already entered the smoothing buffer above).
@@ -429,28 +466,31 @@ extension LinxCGMManager: LinxScannerDelegate {
         // values — BEFORE updating lastSample* fields.
         let (computedTrend, computedRate) = computeTrend(
             currentMgdl: clamped,
-            currentDate: reading.receivedAt
+            currentDate: effectiveReading.receivedAt
         )
         lastComputedTrend = computedTrend
         lastComputedTrendRate = computedRate
 
-        lastSampleSentAt = reading.receivedAt
+        lastSampleSentAt = effectiveReading.receivedAt
         lastSampleValue = clamped
         mutateState { state in
-            state.latestReadingDate = reading.receivedAt
+            state.latestReadingDate = effectiveReading.receivedAt
         }
 
-        logDeviceCommunication("Linx didRead \(reading.glucoseMgdl) mg/dL (raw10=\(reading.raw10)) trend=\(computedTrend)")
+        logDeviceCommunication(
+            "Linx didRead \(effectiveReading.glucoseMgdl) mg/dL "
+                + "(raw10=\(effectiveReading.raw10)) trend=\(computedTrend)"
+        )
 
         let sample = NewGlucoseSample(
-            date: reading.receivedAt,
+            date: effectiveReading.receivedAt,
             quantity: quantity,
             condition: nil,
             trend: computedTrend,
             trendRate: computedRate,
             isDisplayOnly: false,
             wasUserEntered: false,
-            syncIdentifier: syncIdentifier(for: reading),
+            syncIdentifier: syncIdentifier(for: effectiveReading),
             device: device
         )
 
@@ -459,6 +499,9 @@ extension LinxCGMManager: LinxScannerDelegate {
 
     public func linxScanner(_: LinxScanner, didUpdateStatus status: String) {
         lastStatus = status
+        if status.hasPrefix("GATT:") {
+            logDeviceCommunication(status, type: .connection)
+        }
         stateObservers.forEach { $0.linxStatusDidUpdate(status) }
     }
 

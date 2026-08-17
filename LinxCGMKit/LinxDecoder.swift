@@ -1,5 +1,10 @@
 import Foundation
 
+public enum LinxReadingSource: Equatable {
+    case advertisement
+    case gatt
+}
+
 /// A decoded Linx reading.
 public struct LinxGlucoseReading: Equatable {
     public let receivedAt: Date
@@ -8,6 +13,7 @@ public struct LinxGlucoseReading: Equatable {
     public let raw10: Int // raw glu10 (for calibration)
     public let serial: String?
     public let rawHex: String
+    public let source: LinxReadingSource
 
     public var glucoseMmol: Double { Double(glucoseMgdl) / 18.0 }
 }
@@ -43,6 +49,9 @@ public struct LinxCalibration: Equatable {
     // baked in the same curve.
     public static let defaultCalA: Double = 0.06538
     public static let defaultCalB: Double = -1.2615
+    /// Identity curve for an already calibrated GATT mg/dL value expressed as mmol/L.
+    public static let gattDefaultCalA: Double = 1.0 / 18.0
+    public static let gattDefaultCalB: Double = 0
 
     public var calA: Double
     public var calB: Double
@@ -56,6 +65,10 @@ public struct LinxCalibration: Equatable {
         self.calA = calA
         self.calB = calB
         self.points = points
+    }
+
+    public static var gattDefault: LinxCalibration {
+        LinxCalibration(calA: gattDefaultCalA, calB: gattDefaultCalB)
     }
 
     /// Add a new reference point. We keep the 2 most recent.
@@ -97,6 +110,78 @@ public struct LinxCalibration: Equatable {
 public enum LinxDecoder {
     public static func mmolToMgdl(_ mmol: Double) -> Int { Int((mmol * 18.0).rounded()) }
 
+    /// CGM E2E-CRC (CRC-CCITT, polynomial 0x1021, initial value 0xFFFF).
+    /// The checksum is transmitted least-significant byte first.
+    static func cgmCRC(_ data: Data) -> UInt16 {
+        var crc: UInt16 = 0xFFFF
+        for byte in data {
+            crc ^= UInt16(byte) << 8
+            for _ in 0 ..< 8 {
+                if crc & 0x8000 != 0 {
+                    crc = (crc << 1) ^ 0x1021
+                } else {
+                    crc <<= 1
+                }
+            }
+        }
+        return crc
+    }
+
+    static func appendingCGMCRC(to data: Data) -> Data {
+        let crc = cgmCRC(data)
+        var protected = data
+        protected.append(UInt8(truncatingIfNeeded: crc))
+        protected.append(UInt8(truncatingIfNeeded: crc >> 8))
+        return protected
+    }
+
+    /// Decode the standard Bluetooth CGM Measurement characteristic (2AA7).
+    /// DiaExpert reports its factory-calibrated concentration directly in mg/dL;
+    /// applying the legacy Linx advertisement calibration again would distort it.
+    static func decodeCGMMeasurement(
+        _ payload: Data,
+        serial: String?,
+        requiresCRC: Bool
+    ) -> LinxGlucoseReading? {
+        let bytes = [UInt8](payload)
+        guard bytes.count >= (requiresCRC ? 8 : 6),
+              Int(bytes[0]) == bytes.count
+        else { return nil }
+
+        if requiresCRC {
+            let body = Data(payload.dropLast(2))
+            let receivedCRC = UInt16(bytes[bytes.count - 2])
+                | (UInt16(bytes[bytes.count - 1]) << 8)
+            guard cgmCRC(body) == receivedCRC else { return nil }
+        }
+
+        // IEEE-11073 16-bit SFLOAT: signed 12-bit mantissa and signed
+        // 4-bit base-10 exponent, both little-endian on the wire.
+        let raw = UInt16(bytes[2]) | (UInt16(bytes[3]) << 8)
+        guard ![UInt16(0x07FE), 0x07FF, 0x0800, 0x0801, 0x0802].contains(raw) else {
+            return nil
+        }
+        let rawMantissa = Int(raw & 0x0FFF)
+        let mantissa = rawMantissa >= 0x0800 ? rawMantissa - 0x1000 : rawMantissa
+        let rawExponent = Int((raw >> 12) & 0x0F)
+        let exponent = rawExponent >= 0x08 ? rawExponent - 0x10 : rawExponent
+        let concentration = Double(mantissa) * pow(10.0, Double(exponent))
+        guard concentration.isFinite else { return nil }
+
+        let glucoseMgdl = Int(concentration.rounded())
+        guard (27 ... 540).contains(glucoseMgdl) else { return nil }
+
+        return LinxGlucoseReading(
+            receivedAt: Date(),
+            glucoseMgdl: glucoseMgdl,
+            trend: 0,
+            raw10: glucoseMgdl,
+            serial: serial,
+            rawHex: bytes.map { String(format: "%02X", $0) }.joined(),
+            source: .gatt
+        )
+    }
+
     /// Returns the decoded reading, or nil on warmup / bad length.
     /// Calibration is supplied externally (from manager state).
     public static func decode(
@@ -132,7 +217,8 @@ public enum LinxDecoder {
             trend: trend,
             raw10: glu10,
             serial: advName.isEmpty ? nil : advName,
-            rawHex: hex
+            rawHex: hex,
+            source: .advertisement
         )
     }
 }

@@ -13,6 +13,7 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
     /// Linx sensors detected in range (for the picker list).
     @Published var nearbyDevices: [LinxNearbyDevice] = []
     @Published var statusText: String
+    @Published var isReceivingViaGATT: Bool
     @Published var latestGlucoseText: String
     @Published var calA: Double
     @Published var calB: Double
@@ -23,11 +24,14 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
         self.displayGlucosePreference = displayGlucosePreference
 
         let st = cgmManager.state
+        let initialUsesGATT = cgmManager.isReceivingViaGATT
+        let initialCalibration = initialUsesGATT ? st.gattCalibration : st.calibration
         sensorSerial = st.sensorSerial ?? ""
-        calA = st.calibration.calA
-        calB = st.calibration.calB
-        calPoints = st.calibration.points
+        calA = initialCalibration.calA
+        calB = initialCalibration.calB
+        calPoints = initialCalibration.points
         statusText = cgmManager.currentStatusText
+        isReceivingViaGATT = initialUsesGATT
         latestGlucoseText = Self.glucoseText(
             cgmManager.latestReading,
             displayGlucosePreference: displayGlucosePreference
@@ -62,10 +66,19 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
     }
 
     var activeCurveText: String {
+        let inputName = isReceivingViaGATT ? "sensor" : "raw"
         if displaysMgdl {
-            return String(format: "mg/dL = %.5f·raw + %.3f", calA * 18, calB * 18)
+            return String(format: "mg/dL = %.5f·%@ + %.3f", calA * 18, inputName, calB * 18)
         }
-        return String(format: "mmol/L = %.5f·raw + %.3f", calA, calB)
+        return String(format: "mmol/L = %.5f·%@ + %.3f", calA, inputName, calB)
+    }
+
+    var currentCalibrationInputLabel: String {
+        isReceivingViaGATT ? "Sensor value (mg/dL)" : "Current raw (raw10)"
+    }
+
+    func calibrationPointInputText(_ point: LinxCalPoint) -> String {
+        isReceivingViaGATT ? "sensor \(point.glu10)" : "raw \(point.glu10)"
     }
 
     func calibrationPointText(_ point: LinxCalPoint) -> String {
@@ -96,6 +109,8 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
     /// known sensor list.
     func startScanning() {
         cgmManager.startScanningForPicker()
+        isReceivingViaGATT = cgmManager.isReceivingViaGATT
+        refresh()
         nearbyDevices = cgmManager.nearbyDevices
     }
 
@@ -113,20 +128,26 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
         refresh()
     }
 
+    private func activeCalibration(from state: LinxCGMManagerState) -> LinxCalibration {
+        isReceivingViaGATT ? state.gattCalibration : state.calibration
+    }
+
     private func refresh() {
         let st = cgmManager.state
-        calA = st.calibration.calA
-        calB = st.calibration.calB
-        calPoints = st.calibration.points
+        let calibration = activeCalibration(from: st)
+        calA = calibration.calA
+        calB = calibration.calB
+        calPoints = calibration.points
     }
 
     // MARK: - LinxStateObserver
 
     func linxStateDidUpdate(_ state: LinxCGMManagerState) {
         DispatchQueue.main.async {
-            self.calA = state.calibration.calA
-            self.calB = state.calibration.calB
-            self.calPoints = state.calibration.points
+            let calibration = self.activeCalibration(from: state)
+            self.calA = calibration.calA
+            self.calB = calibration.calB
+            self.calPoints = calibration.points
             if self.sensorSerial.isEmpty, let s = state.sensorSerial { self.sensorSerial = s }
             self.latestGlucoseText = Self.glucoseText(
                 self.cgmManager.latestReading,
@@ -138,6 +159,11 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
     func linxStatusDidUpdate(_ status: String) {
         DispatchQueue.main.async {
             self.statusText = status
+            self.isReceivingViaGATT = self.cgmManager.isReceivingViaGATT
+            let calibration = self.activeCalibration(from: self.cgmManager.state)
+            self.calA = calibration.calA
+            self.calB = calibration.calB
+            self.calPoints = calibration.points
             self.latestGlucoseText = Self.glucoseText(
                 self.cgmManager.latestReading,
                 displayGlucosePreference: self.displayGlucosePreference

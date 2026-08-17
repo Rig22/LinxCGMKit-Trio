@@ -26,6 +26,11 @@ public final class LinxScanner: NSObject {
     /// Service UUID advertised by the Linx sensor (16-bit SIG: 181F).
     public static let linxServiceUUID = CBUUID(string: "181F")
 
+    /// Standard CGM characteristics used by DiaExpert Sensor 2.
+    private static let cgmMeasurementUUID = CBUUID(string: "2AA7")
+    private static let cgmFeatureUUID = CBUUID(string: "2AA8")
+    private static let cgmSpecificOpsControlPointUUID = CBUUID(string: "2AAC")
+
     /// In background, restart scan after this much silence (watchdog).
     public static let backgroundScanStaleInterval: TimeInterval = 4 * 60
 
@@ -36,12 +41,27 @@ public final class LinxScanner: NSObject {
 
     private var central: CBCentralManager?
     private var lastSeen: [UUID: Date] = [:]
+    private var gattPeripheral: CBPeripheral?
+    private var gattConnectionPending = false
+    private var gattNotificationsActive = false
+    private var gattCommunicationIntervalRequested = false
+    private var gattCommunicationIntervalSetRequested = false
+    private var gattE2ECRCEnabled: Bool?
+    private var gattOpsControlPoint: CBCharacteristic?
+    private var gattNotificationsStartedAt: Date?
+    private var lastGATTMeasurementAt: Date?
 
     public private(set) var isScanning: Bool = false
     /// Time of last valid Linx manufacturer advertisement (regardless of decode).
     public private(set) var lastAdvertisementAt: Date?
     /// Time of last background scan kick / watchdog restart.
     public private(set) var lastScanRestartAt: Date?
+
+    /// A connected DiaExpert is delivering standard CGM notifications. While
+    /// this is true, scanning is unnecessary and intentionally suspended.
+    public var isReceivingViaGATT: Bool {
+        gattPeripheral?.state == .connected && gattNotificationsActive
+    }
 
     override public init() {
         super.init()
@@ -71,6 +91,7 @@ public final class LinxScanner: NSObject {
 
     public func resumeScanning() {
         ensureCentral()
+        guard !isReceivingViaGATT else { return }
         switch central?.state {
         case .poweredOn:
             if isAppInBackground, isScanning {
@@ -92,6 +113,18 @@ public final class LinxScanner: NSObject {
 
     /// In background, if there has been no fresh data for too long, stopScan → startScan.
     public func restartScanIfStale(lastDataAt: Date?) {
+        if isReceivingViaGATT {
+            let lastActivity = lastGATTMeasurementAt ?? gattNotificationsStartedAt
+            if let lastActivity,
+               Date().timeIntervalSince(lastActivity) >= Self.backgroundScanStaleInterval,
+               let central,
+               let gattPeripheral
+            {
+                notify("GATT: no measurement for four minutes; reconnecting...")
+                central.cancelPeripheralConnection(gattPeripheral)
+            }
+            return
+        }
         guard isAppInBackground else { return }
         let reference = [lastDataAt, lastAdvertisementAt]
             .compactMap { $0 }
@@ -104,8 +137,10 @@ public final class LinxScanner: NSObject {
 
     private func startScan() {
         guard let central = central, central.state == .poweredOn else { return }
+        guard !isReceivingViaGATT else { return }
+        guard !isScanning else { return }
         // In background AllowDuplicatesKey: true — against iOS throttling we get every
-        // advertisement callback; the 3-minute gate filters Loop output.
+        // advertisement callback; the five-minute gate filters Loop output.
         let allowDuplicates = isAppInBackground
         central.scanForPeripherals(
             withServices: [Self.linxServiceUUID],
@@ -162,6 +197,19 @@ public final class LinxScanner: NSObject {
     /// Ensures the old CBCentralManager is freed before re-add creates a new one
     /// with the same restore ID.
     public func stop() {
+        if let central, let gattPeripheral, gattPeripheral.state != .disconnected {
+            central.cancelPeripheralConnection(gattPeripheral)
+        }
+        gattPeripheral?.delegate = nil
+        gattPeripheral = nil
+        gattConnectionPending = false
+        gattNotificationsActive = false
+        gattCommunicationIntervalRequested = false
+        gattCommunicationIntervalSetRequested = false
+        gattE2ECRCEnabled = nil
+        gattOpsControlPoint = nil
+        gattNotificationsStartedAt = nil
+        lastGATTMeasurementAt = nil
         if let central = central, central.state == .poweredOn, isScanning {
             central.stopScan()
         }
@@ -171,7 +219,50 @@ public final class LinxScanner: NSObject {
     }
 
     private func notify(_ s: String) {
+        os_log("%{public}@", log: log, type: .info, s)
         delegate?.linxScanner(self, didUpdateStatus: s)
+    }
+
+    /// Establish the low-power standard CGM connection for DiaExpert Sensor 2.
+    private func startDiaExpertGATTIfNeeded(
+        central: CBCentralManager,
+        peripheral: CBPeripheral,
+        advertisedName: String
+    ) {
+        let normalizedName = advertisedName.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        ).lowercased()
+        guard normalizedName.contains("diaexpert") || normalizedName.contains("diaxprt") else {
+            return
+        }
+
+        if let current = gattPeripheral, current.identifier != peripheral.identifier {
+            return
+        }
+
+        gattPeripheral = peripheral
+        peripheral.delegate = self
+
+        guard peripheral.state == .disconnected, !gattConnectionPending else { return }
+        gattConnectionPending = true
+        notify("GATT: connecting to \(advertisedName)...")
+        central.connect(peripheral, options: nil)
+    }
+
+    private func requestCommunicationIntervalIfReady(from peripheral: CBPeripheral) {
+        guard !gattCommunicationIntervalRequested,
+              let usesCRC = gattE2ECRCEnabled,
+              let controlPoint = gattOpsControlPoint,
+              controlPoint.isNotifying
+        else { return }
+
+        let opcode = Data([0x02])
+        let request = usesCRC ? LinxDecoder.appendingCGMCRC(to: opcode) : opcode
+        let hex = request.map { String(format: "%02X", $0) }.joined()
+        gattCommunicationIntervalRequested = true
+        notify("GATT: requesting current communication interval with \(hex)...")
+        peripheral.writeValue(request, for: controlPoint, type: .withResponse)
     }
 }
 
@@ -203,7 +294,7 @@ extension LinxScanner: CBCentralManagerDelegate {
     }
 
     public func centralManager(
-        _: CBCentralManager,
+        _ central: CBCentralManager,
         didDiscover peripheral: CBPeripheral,
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
@@ -247,6 +338,12 @@ extension LinxScanner: CBCentralManagerDelegate {
             }
         }
 
+        startDiaExpertGATTIfNeeded(
+            central: central,
+            peripheral: peripheral,
+            advertisedName: advName
+        )
+
         // Throttle: 1 s per device
         let now = Date()
         if let last = lastSeen[peripheral.identifier], now.timeIntervalSince(last) < 1.0 {
@@ -258,6 +355,211 @@ extension LinxScanner: CBCentralManagerDelegate {
         let cal = delegate?.calibrationForLinxScanner(self) ?? LinxCalibration()
         if let reading = LinxDecoder.decode(manufacturerData: mfg, advName: advName, calibration: cal) {
             delegate?.linxScanner(self, didRead: reading)
+        }
+    }
+
+    public func centralManager(_: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        guard peripheral.identifier == gattPeripheral?.identifier else { return }
+        gattConnectionPending = false
+        gattCommunicationIntervalRequested = false
+        gattCommunicationIntervalSetRequested = false
+        gattE2ECRCEnabled = nil
+        gattOpsControlPoint = nil
+        gattNotificationsStartedAt = nil
+        lastGATTMeasurementAt = nil
+        notify("GATT: connected; discovering CGM service...")
+        peripheral.discoverServices([Self.linxServiceUUID])
+    }
+
+    public func centralManager(
+        _: CBCentralManager,
+        didFailToConnect peripheral: CBPeripheral,
+        error: Error?
+    ) {
+        guard peripheral.identifier == gattPeripheral?.identifier else { return }
+        gattConnectionPending = false
+        notify("GATT: connection failed: \(error?.localizedDescription ?? "unknown error")")
+        startScan()
+    }
+
+    public func centralManager(
+        _ central: CBCentralManager,
+        didDisconnectPeripheral peripheral: CBPeripheral,
+        error: Error?
+    ) {
+        guard peripheral.identifier == gattPeripheral?.identifier else { return }
+        let shouldReconnect = gattNotificationsActive
+        gattConnectionPending = false
+        gattNotificationsActive = false
+        gattCommunicationIntervalRequested = false
+        gattCommunicationIntervalSetRequested = false
+        gattE2ECRCEnabled = nil
+        gattOpsControlPoint = nil
+        gattNotificationsStartedAt = nil
+        lastGATTMeasurementAt = nil
+        let reason = error?.localizedDescription ?? "without error"
+        notify("GATT: disconnected \(reason); scan resumed")
+        startScan()
+
+        // Ask Core Bluetooth for an immediate low-power reconnect. Scanning is
+        // active only until 2AA7 notifications have been restored.
+        if shouldReconnect {
+            gattConnectionPending = true
+            central.connect(peripheral, options: nil)
+        }
+    }
+}
+
+// MARK: - CBPeripheralDelegate (DiaExpert standard CGM connection)
+
+extension LinxScanner: CBPeripheralDelegate {
+    public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if let error {
+            notify("GATT: service discovery failed: \(error.localizedDescription)")
+            return
+        }
+
+        let services = peripheral.services ?? []
+        guard let cgmService = services.first(where: { $0.uuid == Self.linxServiceUUID }) else {
+            notify("GATT: service 181F is unavailable")
+            return
+        }
+        peripheral.discoverCharacteristics(
+            [Self.cgmMeasurementUUID, Self.cgmFeatureUUID, Self.cgmSpecificOpsControlPointUUID],
+            for: cgmService
+        )
+    }
+
+    public func peripheral(
+        _ peripheral: CBPeripheral,
+        didDiscoverCharacteristicsFor service: CBService,
+        error: Error?
+    ) {
+        if let error {
+            notify("GATT: characteristic discovery failed: \(error.localizedDescription)")
+            return
+        }
+
+        let characteristics = service.characteristics ?? []
+        guard let measurement = characteristics.first(where: { $0.uuid == Self.cgmMeasurementUUID }) else {
+            notify("GATT: measurement characteristic 2AA7 is unavailable")
+            return
+        }
+
+        if let feature = characteristics.first(where: { $0.uuid == Self.cgmFeatureUUID }) {
+            peripheral.readValue(for: feature)
+        }
+        if let controlPoint = characteristics.first(where: { $0.uuid == Self.cgmSpecificOpsControlPointUUID }) {
+            gattOpsControlPoint = controlPoint
+            peripheral.setNotifyValue(true, for: controlPoint)
+        }
+        peripheral.setNotifyValue(true, for: measurement)
+    }
+
+    public func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        if let error {
+            notify("GATT: \(characteristic.uuid.uuidString) setup failed: \(error.localizedDescription)")
+            return
+        }
+
+        if characteristic.uuid == Self.cgmMeasurementUUID {
+            gattNotificationsActive = characteristic.isNotifying
+            if characteristic.isNotifying {
+                gattNotificationsStartedAt = Date()
+                if let central, isScanning {
+                    central.stopScan()
+                    isScanning = false
+                }
+                notify("GATT: 2AA7 active; advertisement scan paused")
+            } else {
+                gattNotificationsStartedAt = nil
+                notify("GATT: 2AA7 inactive; advertisement scan resumed")
+                startScan()
+            }
+        }
+
+        if characteristic.uuid == Self.cgmSpecificOpsControlPointUUID, characteristic.isNotifying {
+            gattOpsControlPoint = characteristic
+            requestCommunicationIntervalIfReady(from: peripheral)
+        }
+    }
+
+    public func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        if let error {
+            notify("GATT: \(characteristic.uuid.uuidString) value failed: \(error.localizedDescription)")
+            return
+        }
+        let payload = characteristic.value ?? Data()
+
+        if characteristic.uuid == Self.cgmMeasurementUUID {
+            guard let usesCRC = gattE2ECRCEnabled else { return }
+            guard let reading = LinxDecoder.decodeCGMMeasurement(
+                payload,
+                serial: peripheral.name,
+                requiresCRC: usesCRC
+            ) else {
+                notify("GATT: invalid 2AA7 measurement ignored")
+                return
+            }
+            lastGATTMeasurementAt = reading.receivedAt
+            delegate?.linxScanner(self, didRead: reading)
+            return
+        }
+
+        if characteristic.uuid == Self.cgmFeatureUUID, payload.count >= 3 {
+            let features = UInt32(payload[0])
+                | (UInt32(payload[1]) << 8)
+                | (UInt32(payload[2]) << 16)
+            gattE2ECRCEnabled = features & (1 << 12) != 0
+            requestCommunicationIntervalIfReady(from: peripheral)
+            return
+        }
+
+        if characteristic.uuid == Self.cgmSpecificOpsControlPointUUID,
+           let usesCRC = gattE2ECRCEnabled,
+           payload.count >= (usesCRC ? 4 : 2),
+           payload[0] == 0x03
+        {
+            if usesCRC {
+                let body = Data(payload.dropLast(2))
+                let receivedCRC = UInt16(payload[payload.count - 2])
+                    | (UInt16(payload[payload.count - 1]) << 8)
+                guard LinxDecoder.cgmCRC(body) == receivedCRC else {
+                    notify("GATT: communication interval response has invalid CRC")
+                    return
+                }
+            }
+
+            let interval = payload[1]
+            notify("GATT: communication interval is \(interval) minute(s)")
+            if interval == 0, !gattCommunicationIntervalSetRequested,
+               let controlPoint = gattOpsControlPoint
+            {
+                let command = Data([0x01, 0x01])
+                let request = usesCRC ? LinxDecoder.appendingCGMCRC(to: command) : command
+                gattCommunicationIntervalSetRequested = true
+                notify("GATT: enabling one-minute measurements...")
+                peripheral.writeValue(request, for: controlPoint, type: .withResponse)
+            }
+        }
+    }
+
+    public func peripheral(
+        _: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        if let error {
+            notify("GATT: \(characteristic.uuid.uuidString) write failed: \(error.localizedDescription)")
+            return
         }
     }
 }

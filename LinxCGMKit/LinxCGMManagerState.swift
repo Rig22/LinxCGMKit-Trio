@@ -10,6 +10,10 @@ public struct LinxCGMManagerState: RawRepresentable, Equatable {
     /// Two-point calibration (slope + offset + recorded points).
     public var calibration: LinxCalibration
 
+    /// Optional correction of the already factory-calibrated DiaExpert GATT value.
+    /// Kept separate because its input is mg/dL, not the legacy Linx raw10 signal.
+    public var gattCalibration: LinxCalibration
+
     /// Time of the last decoded reading (for status display).
     public var latestReadingDate: Date?
 
@@ -19,11 +23,13 @@ public struct LinxCGMManagerState: RawRepresentable, Equatable {
     public init(
         sensorSerial: String? = nil,
         calibration: LinxCalibration = LinxCalibration(),
+        gattCalibration: LinxCalibration = .gattDefault,
         latestReadingDate: Date? = nil,
         uploadReadings: Bool = true
     ) {
         self.sensorSerial = sensorSerial
         self.calibration = calibration
+        self.gattCalibration = gattCalibration
         self.latestReadingDate = latestReadingDate
         self.uploadReadings = uploadReadings
     }
@@ -42,6 +48,16 @@ public struct LinxCGMManagerState: RawRepresentable, Equatable {
             cal.points = pts
         }
         calibration = cal
+
+        var gattCal = LinxCalibration.gattDefault
+        if let a = rawValue["gattCalA"] as? Double { gattCal.calA = a }
+        if let b = rawValue["gattCalB"] as? Double { gattCal.calB = b }
+        if let ptsData = rawValue["gattCalPoints"] as? Data,
+           let pts = try? JSONDecoder().decode([LinxCalPoint].self, from: ptsData)
+        {
+            gattCal.points = pts
+        }
+        gattCalibration = gattCal
     }
 
     public var rawValue: RawValue {
@@ -53,6 +69,11 @@ public struct LinxCGMManagerState: RawRepresentable, Equatable {
         raw["calB"] = calibration.calB
         if let ptsData = try? JSONEncoder().encode(calibration.points) {
             raw["calPoints"] = ptsData
+        }
+        raw["gattCalA"] = gattCalibration.calA
+        raw["gattCalB"] = gattCalibration.calB
+        if let ptsData = try? JSONEncoder().encode(gattCalibration.points) {
+            raw["gattCalPoints"] = ptsData
         }
         return raw
     }
