@@ -3,7 +3,7 @@ import HealthKit
 import LoopKit
 import os.log
 #if canImport(UIKit)
-import UIKit
+    import UIKit
 #endif
 
 public protocol LinxStateObserver: AnyObject {
@@ -11,11 +11,13 @@ public protocol LinxStateObserver: AnyObject {
     func linxStatusDidUpdate(_ status: String)
     /// List of Linx sensors detected in range changed (for picker).
     func linxNearbyDevicesDidUpdate(_ devices: [LinxNearbyDevice])
+    func linxSensorSessionDidUpdate(startDate: Date?, endDate: Date?)
 }
 
 public extension LinxStateObserver {
     // Backward-compatible default: optional for observers that don't care.
     func linxNearbyDevicesDidUpdate(_: [LinxNearbyDevice]) {}
+    func linxSensorSessionDidUpdate(startDate _: Date?, endDate _: Date?) {}
 }
 
 /// A Linx sensor detected in range for the picker list.
@@ -77,6 +79,8 @@ public class LinxCGMManager: CGMManager {
     private let scanner = LinxScanner()
     private var lastStatus: String = "Starting..."
     public var latestReading: LinxGlucoseReading?
+    public private(set) var sensorSessionStartDate: Date?
+    public private(set) var sensorSessionEndDate: Date?
 
     /// Linx sensors detected in range (name → last RSSI + time).
     /// Populated by the scanner; listed by the picker UI.
@@ -135,9 +139,9 @@ public class LinxCGMManager: CGMManager {
 
     public var device: HKDevice? {
         HKDevice(
-            name: state.sensorSerial ?? "Linx",
-            manufacturer: "Linx",
-            model: "Linx CGM",
+            name: state.sensorSerial ?? "DiaExpert Sensor 2",
+            manufacturer: "DiaExpert",
+            model: "DiaExpert Sensor 2",
             hardwareVersion: nil,
             firmwareVersion: nil,
             softwareVersion: "LinxCGMKit",
@@ -148,7 +152,7 @@ public class LinxCGMManager: CGMManager {
 
     public static let pluginIdentifier: String = "LinxCGMManager"
 
-    public let localizedTitle = "Linx CGM"
+    public let localizedTitle = "DiaExpert Sensor 2"
 
     public let isOnboarded = true
 
@@ -297,22 +301,22 @@ public class LinxCGMManager: CGMManager {
 
     private func linxAppStateLabel() -> String {
         #if canImport(UIKit)
-        let state: UIApplication.State
-        if Thread.isMainThread {
-            state = UIApplication.shared.applicationState
-        } else {
-            state = DispatchQueue.main.sync {
-                UIApplication.shared.applicationState
+            let state: UIApplication.State
+            if Thread.isMainThread {
+                state = UIApplication.shared.applicationState
+            } else {
+                state = DispatchQueue.main.sync {
+                    UIApplication.shared.applicationState
+                }
             }
-        }
-        switch state {
-        case .active: return "active"
-        case .inactive: return "inactive"
-        case .background: return "background"
-        @unknown default: return "unknown(\(state.rawValue))"
-        }
+            switch state {
+            case .active: return "active"
+            case .inactive: return "inactive"
+            case .background: return "background"
+            @unknown default: return "unknown(\(state.rawValue))"
+            }
         #else
-        return "unknown"
+            return "unknown"
         #endif
     }
 
@@ -503,6 +507,18 @@ extension LinxCGMManager: LinxScannerDelegate {
             logDeviceCommunication(status, type: .connection)
         }
         stateObservers.forEach { $0.linxStatusDidUpdate(status) }
+    }
+
+    public func linxScanner(
+        _: LinxScanner,
+        didUpdateSensorSessionStartDate startDate: Date?,
+        endDate: Date?
+    ) {
+        sensorSessionStartDate = startDate
+        sensorSessionEndDate = endDate
+        stateObservers.forEach {
+            $0.linxSensorSessionDidUpdate(startDate: startDate, endDate: endDate)
+        }
     }
 
     public func calibrationForLinxScanner(_: LinxScanner) -> LinxCalibration {

@@ -16,11 +16,12 @@ struct LinxSettingsView: View {
             statusSection
             serialSection
             nearbySection
+            sensorLifetimeSection
             calibrationSection
             deleteSection
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Linx CGM")
+        .navigationTitle("DiaExpert Sensor 2")
         .navigationBarItems(trailing: Button("Done", action: didFinish))
         .onAppear { viewModel.startScanning() }
     }
@@ -40,7 +41,7 @@ struct LinxSettingsView: View {
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.trailing)
             }
-            Text("The Loop updates about every 5 minutes with a new Linx reading.")
+            Text("The Loop updates about every 5 minutes with a new DiaExpert Sensor 2 reading.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
         }
@@ -49,9 +50,9 @@ struct LinxSettingsView: View {
     private var serialSection: some View {
         Section(
             header: Text("Sensor serial number"),
-            footer: Text("E.g. LinX-2222296PN2. Leave blank to listen to any Linx sensor. Filters on partial match.")
+            footer: Text("E.g. DiaXprt-22222F5D9S. Leave blank to listen to any DiaExpert Sensor 2. Filters on partial match.")
         ) {
-            TextField("LinX-…", text: $viewModel.sensorSerial)
+            TextField("DiaXprt-…", text: $viewModel.sensorSerial)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
             Button("Save serial number") {
@@ -60,12 +61,12 @@ struct LinxSettingsView: View {
         }
     }
 
-    // MARK: - Picker: nearby compatible Linx sensors
+    // MARK: - Picker: nearby compatible sensors
 
     private var nearbySection: some View {
         Section(
-            header: Text("Nearby Linx sensors"),
-            footer: Text("Tap a sensor to listen to only that one. Useful when several Linx sensors are in range.")
+            header: Text("Nearby DiaExpert Sensor 2"),
+            footer: Text("Tap a sensor to listen to only that one. Useful when several DiaExpert sensors are in range.")
         ) {
             if viewModel.nearbyDevices.isEmpty {
                 HStack {
@@ -97,6 +98,23 @@ struct LinxSettingsView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            }
+        }
+    }
+
+    private var sensorLifetimeSection: some View {
+        Section(header: Text("Sensor lifetime")) {
+            HStack {
+                Text("Start date")
+                Spacer()
+                Text(viewModel.sensorSessionDateText(viewModel.sensorSessionStartDate))
+                    .foregroundColor(.secondary)
+            }
+            HStack {
+                Text("End date")
+                Spacer()
+                Text(viewModel.sensorSessionDateText(viewModel.sensorSessionEndDate))
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -200,12 +218,12 @@ struct LinxSettingsView: View {
             } label: {
                 HStack {
                     Spacer()
-                    Text("Delete Linx CGM")
+                    Text("Delete DiaExpert Sensor 2")
                     Spacer()
                 }
             }
             .confirmationDialog(
-                "Are you sure you want to delete Linx CGM?",
+                "Are you sure you want to delete DiaExpert Sensor 2?",
                 isPresented: $showDeleteConfirm,
                 titleVisibility: .visible
             ) {

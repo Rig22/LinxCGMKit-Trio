@@ -51,7 +51,7 @@ extension LinxCGMManager: CGMManagerUI {
         }
         if state.latestReadingDate == nil {
             return LinxStatusHighlight(
-                localizedMessage: "Linx\nsearching",
+                localizedMessage: "DiaExpert\nsearching",
                 imageName: "dot.radiowaves.left.and.right",
                 state: .normalCGM
             )

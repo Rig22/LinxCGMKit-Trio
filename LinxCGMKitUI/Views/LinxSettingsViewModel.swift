@@ -15,6 +15,8 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
     @Published var statusText: String
     @Published var isReceivingViaGATT: Bool
     @Published var latestGlucoseText: String
+    @Published var sensorSessionStartDate: Date?
+    @Published var sensorSessionEndDate: Date?
     @Published var calA: Double
     @Published var calB: Double
     @Published var calPoints: [LinxCalPoint]
@@ -32,6 +34,8 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
         calPoints = initialCalibration.points
         statusText = cgmManager.currentStatusText
         isReceivingViaGATT = initialUsesGATT
+        sensorSessionStartDate = cgmManager.sensorSessionStartDate
+        sensorSessionEndDate = cgmManager.sensorSessionEndDate
         latestGlucoseText = Self.glucoseText(
             cgmManager.latestReading,
             displayGlucosePreference: displayGlucosePreference
@@ -75,6 +79,11 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
 
     var currentCalibrationInputLabel: String {
         isReceivingViaGATT ? "Sensor value (mg/dL)" : "Current raw (raw10)"
+    }
+
+    func sensorSessionDateText(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 
     func calibrationPointInputText(_ point: LinxCalPoint) -> String {
@@ -174,6 +183,13 @@ class LinxSettingsViewModel: ObservableObject, LinxStateObserver {
     func linxNearbyDevicesDidUpdate(_ devices: [LinxNearbyDevice]) {
         DispatchQueue.main.async {
             self.nearbyDevices = devices
+        }
+    }
+
+    func linxSensorSessionDidUpdate(startDate: Date?, endDate: Date?) {
+        DispatchQueue.main.async {
+            self.sensorSessionStartDate = startDate
+            self.sensorSessionEndDate = endDate
         }
     }
 }

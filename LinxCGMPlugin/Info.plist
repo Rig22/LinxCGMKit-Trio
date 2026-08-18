@@ -19,11 +19,11 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026. Linx CGM reverse-engineered reader.</string>
+	<string>Copyright © 2026. DiaExpert Sensor 2 reader.</string>
 	<key>NSPrincipalClass</key>
 	<string>LinxCGMPlugin</string>
 	<key>com.loopkit.Loop.CGMManagerDisplayName</key>
-	<string>Linx CGM</string>
+	<string>DiaExpert Sensor 2</string>
 	<key>com.loopkit.Loop.CGMManagerIdentifier</key>
 	<string>LinxCGMManager</string>
 </dict>

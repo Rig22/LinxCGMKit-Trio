@@ -110,6 +110,86 @@ public struct LinxCalibration: Equatable {
 public enum LinxDecoder {
     public static func mmolToMgdl(_ mmol: Double) -> Int { Int((mmol * 18.0).rounded()) }
 
+    /// Decode the standard CGM Session Start Time characteristic (2AAA).
+    /// The first seven bytes use the Bluetooth Date Time format, followed by
+    /// time-zone and daylight-saving offsets.
+    static func decodeCGMSessionStartTime(
+        _ payload: Data,
+        requiresCRC: Bool
+    ) -> Date? {
+        let bytes = [UInt8](payload)
+        let expectedCount = requiresCRC ? 11 : 9
+        guard bytes.count == expectedCount else { return nil }
+
+        if requiresCRC {
+            let body = Data(payload.dropLast(2))
+            let receivedCRC = UInt16(bytes[9]) | (UInt16(bytes[10]) << 8)
+            guard cgmCRC(body) == receivedCRC else { return nil }
+        }
+
+        let year = Int(bytes[0]) | (Int(bytes[1]) << 8)
+        let month = Int(bytes[2])
+        let day = Int(bytes[3])
+        let hour = Int(bytes[4])
+        let minute = Int(bytes[5])
+        let second = Int(bytes[6])
+
+        let timeZoneQuarterHours = Int(Int8(bitPattern: bytes[7]))
+        let dstQuarterHours: Int
+        switch bytes[8] {
+        case 0,
+             2,
+             4,
+             8:
+            dstQuarterHours = Int(bytes[8])
+        default:
+            dstQuarterHours = 0
+        }
+
+        let timeZone: TimeZone
+        if timeZoneQuarterHours == -128 {
+            timeZone = .current
+        } else {
+            timeZone = TimeZone(
+                secondsFromGMT: (timeZoneQuarterHours + dstQuarterHours) * 15 * 60
+            ) ?? .current
+        }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        var components = DateComponents()
+        components.calendar = calendar
+        components.timeZone = timeZone
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        components.second = second
+        return calendar.date(from: components)
+    }
+
+    /// Decode the standard CGM Session Run Time characteristic (2AAB).
+    /// Bluetooth defines this little-endian UInt16 value in hours.
+    static func decodeCGMSessionRunTime(
+        _ payload: Data,
+        requiresCRC: Bool
+    ) -> TimeInterval? {
+        let bytes = [UInt8](payload)
+        let expectedCount = requiresCRC ? 4 : 2
+        guard bytes.count == expectedCount else { return nil }
+
+        if requiresCRC {
+            let body = Data(payload.dropLast(2))
+            let receivedCRC = UInt16(bytes[2]) | (UInt16(bytes[3]) << 8)
+            guard cgmCRC(body) == receivedCRC else { return nil }
+        }
+
+        let hours = UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
+        guard hours > 0, hours != .max else { return nil }
+        return TimeInterval(hours) * 60 * 60
+    }
+
     /// CGM E2E-CRC (CRC-CCITT, polynomial 0x1021, initial value 0xFFFF).
     /// The checksum is transmitted least-significant byte first.
     static func cgmCRC(_ data: Data) -> UInt16 {

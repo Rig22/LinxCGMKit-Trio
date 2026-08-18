@@ -2,7 +2,7 @@ import CoreBluetooth
 import Foundation
 import os.log
 #if canImport(UIKit)
-import UIKit
+    import UIKit
 #endif
 
 public protocol LinxScannerDelegate: AnyObject {
@@ -18,6 +18,20 @@ public protocol LinxScannerDelegate: AnyObject {
     /// Linx sensor detected in range (for the picker list).
     /// advName = advertised full name ("LinX-..."), rssi = signal strength.
     func linxScanner(_ scanner: LinxScanner, didDiscoverDeviceNamed advName: String, rssi: Int)
+    /// Start and expected end of the current CGM sensor session.
+    func linxScanner(
+        _ scanner: LinxScanner,
+        didUpdateSensorSessionStartDate startDate: Date?,
+        endDate: Date?
+    )
+}
+
+public extension LinxScannerDelegate {
+    func linxScanner(
+        _: LinxScanner,
+        didUpdateSensorSessionStartDate _: Date?,
+        endDate _: Date?
+    ) {}
 }
 
 public final class LinxScanner: NSObject {
@@ -29,6 +43,8 @@ public final class LinxScanner: NSObject {
     /// Standard CGM characteristics used by DiaExpert Sensor 2.
     private static let cgmMeasurementUUID = CBUUID(string: "2AA7")
     private static let cgmFeatureUUID = CBUUID(string: "2AA8")
+    private static let cgmSessionStartTimeUUID = CBUUID(string: "2AAA")
+    private static let cgmSessionRunTimeUUID = CBUUID(string: "2AAB")
     private static let cgmSpecificOpsControlPointUUID = CBUUID(string: "2AAC")
 
     /// In background, restart scan after this much silence (watchdog).
@@ -48,8 +64,12 @@ public final class LinxScanner: NSObject {
     private var gattCommunicationIntervalSetRequested = false
     private var gattE2ECRCEnabled: Bool?
     private var gattOpsControlPoint: CBCharacteristic?
+    private var gattSessionStartTime: CBCharacteristic?
+    private var gattSessionRunTime: CBCharacteristic?
     private var gattNotificationsStartedAt: Date?
     private var lastGATTMeasurementAt: Date?
+    private var sensorSessionStartDate: Date?
+    private var sensorSessionRunTime: TimeInterval?
 
     public private(set) var isScanning: Bool = false
     /// Time of last valid Linx manufacturer advertisement (regardless of decode).
@@ -164,14 +184,14 @@ public final class LinxScanner: NSObject {
 
     private var isAppInBackground: Bool {
         #if canImport(UIKit)
-        if Thread.isMainThread {
-            return UIApplication.shared.applicationState != .active
-        }
-        return DispatchQueue.main.sync {
-            UIApplication.shared.applicationState != .active
-        }
+            if Thread.isMainThread {
+                return UIApplication.shared.applicationState != .active
+            }
+            return DispatchQueue.main.sync {
+                UIApplication.shared.applicationState != .active
+            }
         #else
-        return false
+            return false
         #endif
     }
 
@@ -208,8 +228,12 @@ public final class LinxScanner: NSObject {
         gattCommunicationIntervalSetRequested = false
         gattE2ECRCEnabled = nil
         gattOpsControlPoint = nil
+        gattSessionStartTime = nil
+        gattSessionRunTime = nil
         gattNotificationsStartedAt = nil
         lastGATTMeasurementAt = nil
+        sensorSessionStartDate = nil
+        sensorSessionRunTime = nil
         if let central = central, central.state == .poweredOn, isScanning {
             central.stopScan()
         }
@@ -263,6 +287,27 @@ public final class LinxScanner: NSObject {
         gattCommunicationIntervalRequested = true
         notify("GATT: requesting current communication interval with \(hex)...")
         peripheral.writeValue(request, for: controlPoint, type: .withResponse)
+    }
+
+    private func readSensorSessionDatesIfReady(from peripheral: CBPeripheral) {
+        guard gattE2ECRCEnabled != nil else { return }
+        if let gattSessionStartTime {
+            peripheral.readValue(for: gattSessionStartTime)
+        }
+        if let gattSessionRunTime {
+            peripheral.readValue(for: gattSessionRunTime)
+        }
+    }
+
+    private func publishSensorSessionDates() {
+        let endDate = sensorSessionStartDate.flatMap { startDate in
+            sensorSessionRunTime.map { startDate.addingTimeInterval($0) }
+        }
+        delegate?.linxScanner(
+            self,
+            didUpdateSensorSessionStartDate: sensorSessionStartDate,
+            endDate: endDate
+        )
     }
 }
 
@@ -365,8 +410,12 @@ extension LinxScanner: CBCentralManagerDelegate {
         gattCommunicationIntervalSetRequested = false
         gattE2ECRCEnabled = nil
         gattOpsControlPoint = nil
+        gattSessionStartTime = nil
+        gattSessionRunTime = nil
         gattNotificationsStartedAt = nil
         lastGATTMeasurementAt = nil
+        sensorSessionStartDate = nil
+        sensorSessionRunTime = nil
         notify("GATT: connected; discovering CGM service...")
         peripheral.discoverServices([Self.linxServiceUUID])
     }
@@ -395,8 +444,12 @@ extension LinxScanner: CBCentralManagerDelegate {
         gattCommunicationIntervalSetRequested = false
         gattE2ECRCEnabled = nil
         gattOpsControlPoint = nil
+        gattSessionStartTime = nil
+        gattSessionRunTime = nil
         gattNotificationsStartedAt = nil
         lastGATTMeasurementAt = nil
+        sensorSessionStartDate = nil
+        sensorSessionRunTime = nil
         let reason = error?.localizedDescription ?? "without error"
         notify("GATT: disconnected \(reason); scan resumed")
         startScan()
@@ -425,7 +478,13 @@ extension LinxScanner: CBPeripheralDelegate {
             return
         }
         peripheral.discoverCharacteristics(
-            [Self.cgmMeasurementUUID, Self.cgmFeatureUUID, Self.cgmSpecificOpsControlPointUUID],
+            [
+                Self.cgmMeasurementUUID,
+                Self.cgmFeatureUUID,
+                Self.cgmSessionStartTimeUUID,
+                Self.cgmSessionRunTimeUUID,
+                Self.cgmSpecificOpsControlPointUUID
+            ],
             for: cgmService
         )
     }
@@ -449,6 +508,8 @@ extension LinxScanner: CBPeripheralDelegate {
         if let feature = characteristics.first(where: { $0.uuid == Self.cgmFeatureUUID }) {
             peripheral.readValue(for: feature)
         }
+        gattSessionStartTime = characteristics.first(where: { $0.uuid == Self.cgmSessionStartTimeUUID })
+        gattSessionRunTime = characteristics.first(where: { $0.uuid == Self.cgmSessionRunTimeUUID })
         if let controlPoint = characteristics.first(where: { $0.uuid == Self.cgmSpecificOpsControlPointUUID }) {
             gattOpsControlPoint = controlPoint
             peripheral.setNotifyValue(true, for: controlPoint)
@@ -519,7 +580,38 @@ extension LinxScanner: CBPeripheralDelegate {
                 | (UInt32(payload[1]) << 8)
                 | (UInt32(payload[2]) << 16)
             gattE2ECRCEnabled = features & (1 << 12) != 0
+            readSensorSessionDatesIfReady(from: peripheral)
             requestCommunicationIntervalIfReady(from: peripheral)
+            return
+        }
+
+        if characteristic.uuid == Self.cgmSessionStartTimeUUID,
+           let usesCRC = gattE2ECRCEnabled
+        {
+            guard let startDate = LinxDecoder.decodeCGMSessionStartTime(
+                payload,
+                requiresCRC: usesCRC
+            ) else {
+                notify("GATT: invalid session start time ignored")
+                return
+            }
+            sensorSessionStartDate = startDate
+            publishSensorSessionDates()
+            return
+        }
+
+        if characteristic.uuid == Self.cgmSessionRunTimeUUID,
+           let usesCRC = gattE2ECRCEnabled
+        {
+            guard let runTime = LinxDecoder.decodeCGMSessionRunTime(
+                payload,
+                requiresCRC: usesCRC
+            ) else {
+                notify("GATT: invalid session run time ignored")
+                return
+            }
+            sensorSessionRunTime = runTime
+            publishSensorSessionDates()
             return
         }
 

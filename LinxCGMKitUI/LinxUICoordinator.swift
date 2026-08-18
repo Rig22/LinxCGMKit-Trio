@@ -65,7 +65,7 @@ class LinxUICoordinator: UINavigationController, CGMManagerOnboarding, Completio
             }
         )
         let hosting = DismissibleHostingController(content: view, colorPalette: colorPalette)
-        hosting.title = "Linx CGM"
+        hosting.title = "DiaExpert Sensor 2"
         return hosting
     }
 }
