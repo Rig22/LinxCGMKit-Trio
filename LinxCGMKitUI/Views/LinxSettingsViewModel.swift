@@ -1,7 +1,6 @@
 import Combine
 import Foundation
 import LinxCGMKit
-import LoopAlgorithm
 import LoopKit
 import LoopKitUI
 
